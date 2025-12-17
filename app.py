@@ -11,10 +11,11 @@ from gaze import analyze_gaze
 from concentration import get_engagement_prob
 from fusion import AttentionFusion, summarize_session
 
-# Page Config
+# ---------------------------
+# CONFIGURATION & STATE
+# ---------------------------
 st.set_page_config(page_title="Student Engagement Analysis", layout="wide")
 
-# Initialize Session State for Live Reporting
 if "logs" not in st.session_state:
     st.session_state.logs = []
 if "behavior_history" not in st.session_state:
@@ -22,7 +23,7 @@ if "behavior_history" not in st.session_state:
 if "fusion" not in st.session_state:
     st.session_state.fusion = AttentionFusion()
 
-# Colors for Indicators
+# Colors (BGR)
 COLOR_FOCUSED = (0, 255, 0)      # Green
 COLOR_CONFUSED = (0, 165, 255)   # Orange
 COLOR_FRUSTRATED = (0, 0, 255)   # Red
@@ -30,50 +31,69 @@ COLOR_BORED = (255, 255, 0)      # Cyan
 COLOR_DROWSY = (128, 0, 128)     # Purple
 COLOR_AWAY = (0, 0, 0)           # Black
 
+# ---------------------------
+# HELPER FUNCTIONS
+# ---------------------------
 def determine_state_and_color(gaze, prob):
-    """Maps Gaze + Score to your specific categories."""
+    """
+    Determines the label and color based on AI Score and Gaze.
+    Priority: Drowsy (Low Score) -> Looking Away (Gaze) -> Engaged States
+    """
+    # 1. Check for Drowsy/Sleeping FIRST (Low score = eyes closed/head drop)
+    if prob < 0.40:
+        return "Not Engaged: Drowsy", COLOR_DROWSY
+
+    # 2. Check for Distraction (Good score but looking away)
     if gaze == "OFF_SCREEN":
         return "Not Engaged: Looking Away", COLOR_AWAY
 
-    if prob >= 0.85: return "Engaged: Focused", COLOR_FOCUSED
-    elif prob >= 0.65: return "Engaged: Confused", COLOR_CONFUSED
-    elif prob >= 0.50: return "Engaged: Frustrated", COLOR_FRUSTRATED
-    elif prob >= 0.30: return "Not Engaged: Bored", COLOR_BORED
-    else: return "Not Engaged: Drowsy", COLOR_DROWSY
+    # 3. Classified Engaged States based on intensity
+    if prob >= 0.85: 
+        return "Engaged: Focused", COLOR_FOCUSED
+    elif prob >= 0.65: 
+        return "Engaged: Confused", COLOR_CONFUSED
+    elif prob >= 0.40: 
+        return "Engaged: Frustrated", COLOR_FRUSTRATED
+    
+    return "Not Engaged: Bored", COLOR_BORED
 
 def draw_indicator(frame, box, label, color):
-    """Draws the box and label on the frame."""
+    """Draws the bounding box and text label on the frame."""
+    if box is None: return
+    
     (x, y, w, h) = box
+    # Draw Rectangle
     cv2.rectangle(frame, (x, y), (x+w, y+h), color, 2)
+    
+    # Draw Label Background
     (text_w, text_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
     cv2.rectangle(frame, (x, y - 25), (x + text_w, y), color, -1)
+    
+    # Draw Text
     cv2.putText(frame, label, (x, y - 7), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
 # ---------------------------
-# MAIN APP
+# MAIN APPLICATION
 # ---------------------------
 st.title("Student Engagement Analyzer")
 
 mode = st.sidebar.radio("Mode", ["Upload Video", "Live Camera"])
 
-# ---------------------------
-# LIVE CAMERA MODE
-# ---------------------------
+# ===========================
+# 1. LIVE CAMERA MODE
+# ===========================
 if mode == "Live Camera":
     st.write("### 🎥 Live Analysis")
-    st.info("Check the box below to start. Uncheck it to Stop and generate the report.")
+    st.info("Check the box to start. Uncheck to stop and view report.")
 
-    # CONTROL CHECKBOX
     run_live = st.checkbox("Start/Stop Live Camera")
     
-    # Placeholders for Layout
     frame_window = st.image([])
     metrics_placeholder = st.empty()
 
     if run_live:
-        # --- STARTING ---
-        # If we just started, clear previous logs to start fresh
-        if len(st.session_state.logs) > 0 and st.session_state.get("just_started", True):
+        # Reset session if starting fresh
+        if st.session_state.get("just_started", True):
              st.session_state.logs = []
              st.session_state.behavior_history = []
              st.session_state.fusion = AttentionFusion()
@@ -87,7 +107,7 @@ if mode == "Live Camera":
                 st.error("Camera not found.")
                 break
             
-            # Crash Fix: Reset gaze if resolution changes
+            # Resolution safety check
             if frame.shape[:2] != (480, 640): pass 
 
             # Analysis
@@ -100,59 +120,41 @@ if mode == "Live Camera":
                 draw_indicator(frame, box, label, color)
                 st.session_state.fusion.update(gaze, prob)
             else:
-                # Handle Absent
                 st.session_state.fusion.update("ABSENT", None)
 
-            # Store Metrics in Session State
+            # Metrics
             metrics = st.session_state.fusion.compute_metrics()
             if metrics:
                 st.session_state.logs.append(metrics)
                 st.session_state.behavior_history = st.session_state.fusion.behavior_history
-                
-                # Show simple live stat
                 metrics_placeholder.markdown(f"**Status:** {metrics['BEHAVIOR']} | **Score:** {metrics['CAS']}")
 
-            # Convert for Streamlit display
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             frame_window.image(frame)
 
         cap.release()
 
     else:
-        # --- STOPPED: GENERATE REPORT ---
-        # This block runs when the checkbox is UNCHECKED
+        # STOPPED -> GENERATE REPORT
         if len(st.session_state.logs) > 0:
             st.divider()
-            st.success("✅ Session Stopped. Generating Report...")
+            st.session_state.just_started = True # Prepare reset for next run
             
-            # Prepare Summary
             summary = summarize_session(st.session_state.logs, st.session_state.behavior_history)
             
-            # Columns for Layout
             c1, c2 = st.columns(2)
-            
             with c1:
-                st.subheader("📊 Session Summary")
                 st.metric("Final Engagement Score", summary["Average_CAS"])
                 st.metric("Overall Verdict", summary["Final_Verdict"])
-            
             with c2:
-                st.subheader("🧠 Behavior Breakdown")
                 st.dataframe(summary["Behavior_Breakdown"])
 
-            # Timeline Graph
             st.subheader("📈 Engagement Over Time")
-            if len(st.session_state.logs) > 0:
-                df = pd.DataFrame(st.session_state.logs)
-                df['Time'] = df.index
-                st.line_chart(df, x='Time', y='CAS')
-            
-            # Reset flag so next time we click start, it clears data
-            st.session_state.just_started = True
+            st.line_chart([l['CAS'] for l in st.session_state.logs])
 
-# ---------------------------
-# UPLOAD VIDEO MODE
-# ---------------------------
+# ===========================
+# 2. UPLOAD VIDEO MODE
+# ===========================
 elif mode == "Upload Video":
     uploaded_file = st.file_uploader("Upload Lecture Video (MP4)", type=["mp4", "avi"])
 
@@ -165,24 +167,31 @@ elif mode == "Upload Video":
         
         if st.button("🚀 Process Video Now"):
             cap = cv2.VideoCapture(video_path)
+            
+            # Video Properties
             width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             fps = int(cap.get(cv2.CAP_PROP_FPS))
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-            # Codec setup (H.264)
+            # Output Setup (H.264 for Browser Support)
             output_path = os.path.join(tempfile.gettempdir(), "processed_result.mp4")
             fourcc = cv2.VideoWriter_fourcc(*'avc1') 
             out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
 
+            # Analysis Init
             fusion = AttentionFusion(window_seconds=5, fps=fps)
             logs = []
             
+            # Progress UI
             progress_bar = st.progress(0)
             status_text = st.empty()
             
+            # OPTIMIZATION VARS
             frame_count = 0
             SKIP_FRAMES = 3 
+            
+            # State Memory (for skipped frames)
             last_box = None
             last_label = ""
             last_color = (0, 255, 0)
@@ -191,15 +200,17 @@ elif mode == "Upload Video":
                 ret, frame = cap.read()
                 if not ret: break
                 
-                # Resize for AI
+                # Resize for Fast AI Detection
                 small_frame = cv2.resize(frame, (640, 360)) 
                 scale_x = width / 640
                 scale_y = height / 360
 
+                # --- AI PROCESSING (Every 3rd frame) ---
                 if frame_count % SKIP_FRAMES == 0:
                     gaze = analyze_gaze(small_frame)
                     prob, small_box = get_engagement_prob(small_frame)
                     
+                    # Update Fusion Stats
                     if small_box:
                         fusion.update(gaze, prob)
                     else:
@@ -208,18 +219,24 @@ elif mode == "Upload Video":
                     metrics = fusion.compute_metrics()
                     if metrics: logs.append(metrics)
 
+                    # Update Drawing Coordinates
                     if small_box is not None:
                         (sx, sy, sw, sh) = small_box
+                        # Scale back to original resolution
                         real_box = (int(sx*scale_x), int(sy*scale_y), int(sw*scale_x), int(sh*scale_y))
+                        
                         last_box = real_box
                         last_label, last_color = determine_state_and_color(gaze, prob)
                     else:
                         last_box = None
                 
+                # --- DRAWING (Every frame) ---
                 if last_box is not None:
                     draw_indicator(frame, last_box, last_label, last_color)
                 
                 out.write(frame)
+                
+                # UI Update
                 frame_count += 1
                 if frame_count % 50 == 0:
                     progress_bar.progress(min(frame_count / total_frames, 1.0))
@@ -228,6 +245,8 @@ elif mode == "Upload Video":
             out.release()
             
             st.success("Processing Complete!")
+            
+            # Results
             st.subheader("📽️ Processed Video")
             st.video(output_path)
 
@@ -235,12 +254,13 @@ elif mode == "Upload Video":
             
             # Report
             summary = summarize_session(logs, fusion.behavior_history)
-            c1, c2 = st.columns(2)
             
+            c1, c2 = st.columns(2)
             with c1:
                 st.metric("Overall Score", summary["Average_CAS"])
                 st.metric("Verdict", summary["Final_Verdict"])
             with c2:
                 st.dataframe(summary["Behavior_Breakdown"])
                 
+            st.subheader("📈 Engagement Timeline")
             st.line_chart([l['CAS'] for l in logs])
